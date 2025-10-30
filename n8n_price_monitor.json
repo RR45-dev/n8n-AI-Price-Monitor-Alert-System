@@ -1,0 +1,410 @@
+{
+  "meta": {
+    "instanceId": "2ed286b2-4bf2-480f-ac66-f8255ce805fc"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "path": "add-watch",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "WebhookAddWatch",
+      "name": "Webhook: Add Watch",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        80,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO products (org_id, title, brand, sku, gtin, asin, canonical_url, attributes)\nVALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::jsonb)\nON CONFLICT (canonical_url) DO UPDATE SET title = EXCLUDED.title\nRETURNING id\n",
+        "additionalFields": {}
+      },
+      "id": "PG_InsertProduct",
+      "name": "PG: Insert Product",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        360,
+        -40
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CRED_ID",
+          "name": "Postgres (edit me)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO product_sources (product_id, retailer, url, currency, last_status)\nVALUES ($1::uuid, $2, $3, $4, 'ok')\nON CONFLICT (url) DO NOTHING\nRETURNING id\n"
+      },
+      "id": "PG_InsertSource",
+      "name": "PG: Insert Source",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        620,
+        -40
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CRED_ID",
+          "name": "Postgres (edit me)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": 15
+        }
+      },
+      "id": "CronPoll",
+      "name": "Cron: Poll Sources",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        80,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT s.id as source_id, s.url, s.currency, s.product_id FROM product_sources s"
+      },
+      "id": "PG_ListSources",
+      "name": "PG: List Sources",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        300,
+        260
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CRED_ID",
+          "name": "Postgres (edit me)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{$json[\"url\"]}}",
+        "responseFormat": "string",
+        "options": {
+          "followRedirect": true,
+          "redirect": {
+            "maxRedirects": 5
+          },
+          "ignoreResponseCode": true
+        }
+      },
+      "id": "HTTP_GetPage",
+      "name": "HTTP: Get Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        520,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse price from HTML text using CSS-ish hints and regex fallbacks.\nconst html = items[0].json;\nconst body = html.body || html; // string\nfunction extractPrice(s) {\n  // Look for common patterns like $1,234.56 and 1.234,56 etc.\n  const patterns = [\n    /\\$(\\d{1,3}(?:[,\\s]\\d{3})*(?:\\.\\d{2})?)/,   // $1,299.99\n    /content=\\\"\\$(\\d+(?:\\.\\d{2})?)\\\"/i,\n    /itemprop=\\\"price\\\"[^>]*content=\\\"(\\d+(?:\\.\\d{2})?)\\\"/i,\n    /data-price\\s*=\\s*\\\"(\\d+(?:\\.\\d{2})?)\\\"/i\n  ];\n  for (const re of patterns) {\n    const m = re.exec(s);\n    if (m) return parseFloat(m[1].replace(/[\\s,]/g,''));\n  }\n  // Loose fallback: find the first currency-like block\n  const m2 = /(?:USD|\\$)\\s*(\\d{1,3}(?:[,\\s]\\d{3})*(?:\\.\\d{2})?)/i.exec(s);\n  if (m2) return parseFloat(m2[1].replace(/[\\s,]/g,''));\n  return null;\n}\nconst price = extractPrice(body);\nif (!price) {\n  return [{ json: { error: \"PRICE_NOT_FOUND\", raw_len: (body||'').length } }];\n}\nreturn [{ json: { price, html_length: (body||'').length } }];\n"
+      },
+      "id": "FN_ParsePrice",
+      "name": "FN: Parse Price",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        740,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO prices (product_id, source_id, price_cents, in_stock, crawled_at)\nVALUES ($1::uuid, $2::uuid, round($3 * 100)::int, TRUE, now())\nRETURNING id\n"
+      },
+      "id": "PG_InsertPrice",
+      "name": "PG: Insert Price",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        960,
+        260
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CRED_ID",
+          "name": "Postgres (edit me)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT a.id, a.type, a.params, a.channels, p.title, s.url\nFROM alerts a \nJOIN products p ON p.id = a.product_id\nJOIN product_sources s ON s.product_id = p.id\nWHERE a.product_id = $1::uuid AND a.is_active = TRUE\n"
+      },
+      "id": "PG_FetchAlerts",
+      "name": "PG: Fetch Alerts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        1160,
+        260
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CRED_ID",
+          "name": "Postgres (edit me)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Evaluate alert rules using current price and channels.\nconst price = $json['price'] || ($items(0)[0].json.price); // from FN_ParsePrice\nconst product_id = $items(0)[0].json.product_id || $json['product_id'];\nconst source_id = $items(0)[0].json.source_id || $json['source_id'];\nconst alerts = items.map(i => i.json);\nconst out = [];\nfor (const a of alerts) {\n  const params = typeof a.params === 'string' ? JSON.parse(a.params) : a.params;\n  if (a.type === 'target_price' && params.target_cents) {\n    if (Math.round(price*100) <= params.target_cents) {\n      out.push({ json: { hit: true, title: a.title || 'Target price', product_id, source_id, price, channels: a.channels, url: a.url } });\n    }\n  }\n  if (a.type === 'price_drop' && params.threshold_pct) {\n    // Fetch 30-day avg from previous node? Here we shortcut: trigger on any 10%+ drop vs last 3 prices\n    // This node expects an enrichment step; keep simple for starter.\n  }\n  if (a.type === 'competitor_delta' && params.delta_cents) {\n    // In starter, seller-specific delta is handled by a separate workflow.\n  }\n}\nreturn out.length ? out.map(o => ({ json: o.json })) : [{ json: { hit: false } }];\n"
+      },
+      "id": "FN_EvalAlerts",
+      "name": "FN: Eval Alerts",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1380,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json[\"hit\"]}}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      },
+      "id": "IF_Hit",
+      "name": "IF: Alert Hit?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1600,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@example.com",
+        "toEmail": "={{$json[\"channels\"]?.email?.[0] || \"edit@me.com\"}}",
+        "subject": "Price alert: {{$json[\"title\"] || \"Product\"}}",
+        "text": "Now at ${{$json[\"price\"]}} \u2014 {{$json[\"url\"] || \"Open product\"}}"
+      },
+      "id": "Email_Notify",
+      "name": "Email: Notify",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        1820,
+        200
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "SMTP_CRED_ID",
+          "name": "SMTP (edit me)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "none",
+        "resource": "message",
+        "operation": "post",
+        "channelId": "={{$json[\"channels\"]?.slack?.[0] || \"#alerts\"}}",
+        "text": "Price alert: now ${{$json[\"price\"]}} \u2014 {{$json[\"url\"] || \"link\"}}"
+      },
+      "id": "Slack_Notify",
+      "name": "Slack: Notify",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 3,
+      "position": [
+        1820,
+        320
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "SLACK_CRED_ID",
+          "name": "Slack (edit me)"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "NoopEnd",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2040,
+        260
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook: Add Watch": {
+      "main": [
+        [
+          {
+            "node": "PG: Insert Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: Insert Product": {
+      "main": [
+        [
+          {
+            "node": "PG: Insert Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron: Poll Sources": {
+      "main": [
+        [
+          {
+            "node": "PG: List Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: List Sources": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Get Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: Get Page": {
+      "main": [
+        [
+          {
+            "node": "FN: Parse Price",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FN: Parse Price": {
+      "main": [
+        [
+          {
+            "node": "PG: Insert Price",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: Insert Price": {
+      "main": [
+        [
+          {
+            "node": "PG: Fetch Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: Fetch Alerts": {
+      "main": [
+        [
+          {
+            "node": "FN: Eval Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FN: Eval Alerts": {
+      "main": [
+        [
+          {
+            "node": "IF: Alert Hit?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Alert Hit?": {
+      "main": [
+        [
+          {
+            "node": "Email: Notify",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Slack: Notify",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Email: Notify": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Notify": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
